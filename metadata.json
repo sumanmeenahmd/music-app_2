@@ -1,0 +1,6 @@
+{
+  "name": "Sonora",
+  "description": "Full-screen music player app wrapping music-app-3wj.pages.dev with offline PWA caching, adaptive device theming, and splash screen.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

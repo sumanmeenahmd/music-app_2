@@ -1,0 +1,109 @@
+name: Build and Release APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Signed Release APK
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.3.1
+
+      - name: Ensure persistent release keystore exists
+        env:
+          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ ! -f "my-upload-key.jks" ]; then
+            echo "No release keystore found. Generating a persistent upload keystore..."
+            PASS="${SECRET_STORE_PASSWORD}"
+            if [ -z "$PASS" ]; then
+              PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
+              echo "STORE_PASSWORD=$PASS" > .signing.env
+            fi
+            KEY_PASS="${SECRET_KEY_PASSWORD:-$PASS}"
+
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -alias upload \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=Sonora, OU=Mobile, O=Sonora, L=Unknown, ST=Unknown, C=US"
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add my-upload-key.jks
+            if [ -f ".signing.env" ]; then
+              git add .signing.env
+            fi
+            git commit -m "chore: add generated release keystore [skip ci]"
+            git pull --rebase origin "${{ github.ref_name }}" || true
+            git push origin HEAD:"${{ github.ref_name }}"
+          fi
+
+          if [ -n "$SECRET_STORE_PASSWORD" ]; then
+            PASS="$SECRET_STORE_PASSWORD"
+          elif [ -f ".signing.env" ]; then
+            # shellcheck disable=SC1091
+            source .signing.env
+            PASS="$STORE_PASSWORD"
+          else
+            echo "::error::Keystore exists, but STORE_PASSWORD secret or .signing.env is missing."
+            exit 1
+          fi
+
+          KEY_PASS="${SECRET_KEY_PASSWORD:-$PASS}"
+          echo "::add-mask::$PASS"
+          echo "::add-mask::$KEY_PASS"
+          echo "KEYSTORE_PATH=${{ github.workspace }}/my-upload-key.jks" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$KEY_PASS" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: 1.0.${{ github.run_number }}
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          gradle assembleRelease --no-daemon
+          APK_SRC="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_SRC" ]; then
+            echo "::error::Release APK was not generated at $APK_SRC"
+            exit 1
+          fi
+          APK_OUT="Sonora-v${VERSION_NAME}.apk"
+          cp "$APK_SRC" "$APK_OUT"
+          echo "APK_OUT=$APK_OUT" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v${VERSION_NAME}" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "$APK_OUT" \
+            --title "Sonora $RELEASE_TAG" \
+            --notes "Automated release build for commit ${{ github.sha }} (versionCode: ${{ github.run_number }})" \
+            --target "${{ github.sha }}"
